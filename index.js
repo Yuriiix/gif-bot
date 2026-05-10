@@ -25,6 +25,9 @@ client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
+/* ===================== CONFIG ===================== */
+const MAX_SIZE = 7 * 1024 * 1024; // 7MB safety limit
+
 /* ===================== MESSAGE EVENT ===================== */
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
@@ -41,7 +44,7 @@ client.on('messageCreate', async (message) => {
   const input = `./input-${id}.mp4`;
   const output = `./output-${id}.gif`;
 
-  /* ===================== DOWNLOAD VIDEO ===================== */
+  /* ===================== DOWNLOAD ===================== */
   const response = await axios({
     url: attachment.url,
     method: 'GET',
@@ -50,7 +53,6 @@ client.on('messageCreate', async (message) => {
 
   const writer = fs.createWriteStream(input);
 
-  // Handle download errors
   writer.on('error', (err) => {
     console.log("Download error:", err);
   });
@@ -59,34 +61,68 @@ client.on('messageCreate', async (message) => {
     console.log("Stream error:", err);
   });
 
-  // When download is finished → convert
-  writer.on('finish', () => {
-    ffmpeg(input)
-      .outputOptions([
-        '-vf',
-        'fps=10,scale=320:-1:flags=lanczos'
-      ])
-      .save(output)
-      .on('end', async () => {
-        try {
-          await message.reply({ files: [output] });
-        } catch (err) {
-          console.log(err);
-        }
-
-        fs.unlinkSync(input);
-        fs.unlinkSync(output);
-      })
-      .on('error', (err) => {
-        console.log("FFmpeg error:", err);
-      });
-  });
-
-  // Start download
   response.data.pipe(writer);
+
+  writer.on('finish', async () => {
+
+    /* ===================== BEST START QUALITY ===================== */
+    let fps = 22;
+    let width = 720;
+
+    const createGif = () => {
+      return new Promise((resolve, reject) => {
+        ffmpeg(input)
+          .outputOptions([
+            '-t', '6', // keep fast + stable
+            '-vf',
+            `fps=${fps},scale=${width}:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=256:stats_mode=diff[p];[s1][p]paletteuse=dither=sierra2_4a`,
+            '-loop',
+            '0',
+            '-preset',
+            'veryfast'
+          ])
+          .save(output)
+          .on('end', resolve)
+          .on('error', reject);
+      });
+    };
+
+    /* ===================== SMART SIZE CONTROL ===================== */
+    let attempts = 0;
+    const MAX_ATTEMPTS = 4;
+
+    while (attempts < MAX_ATTEMPTS) {
+      await createGif();
+
+      const size = fs.statSync(output).size;
+
+      if (size <= MAX_SIZE) break;
+
+      // gradual quality reduction
+      if (width > 480) {
+        width -= 120;
+      } else if (fps > 14) {
+        fps -= 2;
+      } else {
+        break;
+      }
+
+      fs.unlinkSync(output);
+      attempts++;
+    }
+
+    try {
+      await message.reply({ files: [output] });
+    } catch (err) {
+      console.log(err);
+    }
+
+    fs.unlinkSync(input);
+    fs.unlinkSync(output);
+  });
 });
 
-/* ===================== EXPRESS (RENDER KEEP-ALIVE) ===================== */
+/* ===================== EXPRESS ===================== */
 app.get("/", (req, res) => {
   res.send("Bot is alive");
 });

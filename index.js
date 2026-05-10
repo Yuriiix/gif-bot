@@ -25,23 +25,28 @@ client.once("clientReady", () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
-/* ===================== CONFIG ===================== */
-const MAX_SIZE = 7 * 1024 * 1024;
+/* ===================== EXPRESS ===================== */
+app.get("/", (req, res) => {
+  res.send("Bot is alive");
+});
 
-/* ===================== FFMPEG ===================== */
+app.listen(process.env.PORT || 3000, () => {
+  console.log("Web server running");
+});
+
+/* ===================== HELPERS ===================== */
 function runFFmpeg(input, output, fps, width) {
   return new Promise((resolve, reject) => {
     ffmpeg(input)
       .outputOptions([
-        "-vf",
-        `fps=${fps},scale=${width}:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=256:stats_mode=diff[p];[s1][p]paletteuse=dither=sierra2_4a`,
+        "-t", "5", // prevents long conversions freezing server
 
-        "-loop",
-        "0",
-        "-preset",
-        "veryfast",
-        "-threads",
-        "2"
+        "-vf",
+        `fps=${fps},scale=${width}:-1:flags=lanczos`,
+
+        "-loop", "0",
+        "-preset", "veryfast",
+        "-threads", "2"
       ])
       .save(output)
       .on("end", resolve)
@@ -80,42 +85,36 @@ client.on("messageCreate", async (message) => {
       response.data.on("error", reject);
     });
 
-    /* ===================== SMART START SETTINGS ===================== */
-    const fileSizeMB = (attachment.size || 0) / 1024 / 1024;
+    /* ===================== SMART QUALITY SYSTEM ===================== */
+    const sizeMB = (attachment.size || 0) / 1024 / 1024;
 
-    let fps, width;
+    let fps = 16;
+    let width = 480;
 
-    if (fileSizeMB < 3) {
-      fps = 20;
-      width = 640;
-    } else if (fileSizeMB < 8) {
-      fps = 16;
-      width = 520;
-    } else {
+    if (sizeMB < 3) {
+      fps = 18;
+      width = 560;
+    } else if (sizeMB > 8) {
       fps = 12;
-      width = 420;
+      width = 360;
     }
 
-    /* ===================== SINGLE OPTIMIZED RUN ===================== */
+    console.log(`Converting: ${fps}fps | ${width}px | ${sizeMB.toFixed(2)}MB`);
+
+    /* ===================== CONVERT ===================== */
     await runFFmpeg(input, output, fps, width);
 
-    const size = fs.existsSync(output)
-      ? fs.statSync(output).size
-      : 0;
-
-    /* ===================== AUTO DOWNGRADE ONCE (NOT LOOP SPAM) ===================== */
-    if (size > MAX_SIZE) {
-      fs.unlinkSync(output);
-
-      fps = Math.max(10, fps - 4);
-      width = Math.max(320, width - 120);
-
-      await runFFmpeg(input, output, fps, width);
-    }
-
-    /* ===================== SEND GIF ===================== */
     if (!fs.existsSync(output)) {
       await message.reply("Conversion failed.");
+      return;
+    }
+
+    const outSizeMB = fs.statSync(output).size / 1024 / 1024;
+
+    console.log(`Output size: ${outSizeMB.toFixed(2)}MB`);
+
+    if (outSizeMB > 7) {
+      await message.reply("GIF too large for Discord (try shorter video).");
       return;
     }
 
@@ -128,15 +127,6 @@ client.on("messageCreate", async (message) => {
     if (fs.existsSync(input)) fs.unlinkSync(input);
     if (fs.existsSync(output)) fs.unlinkSync(output);
   }
-});
-
-/* ===================== EXPRESS ===================== */
-app.get("/", (req, res) => {
-  res.send("Bot is alive");
-});
-
-app.listen(process.env.PORT || 3000, () => {
-  console.log("Web server running");
 });
 
 /* ===================== LOGIN ===================== */

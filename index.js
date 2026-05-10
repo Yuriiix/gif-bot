@@ -38,9 +38,10 @@ function runFFmpeg(input, output, fps, width) {
 
         "-loop",
         "0",
-
         "-preset",
         "veryfast",
+        "-threads",
+        "2"
       ])
       .save(output)
       .on("end", resolve)
@@ -53,15 +54,12 @@ client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
 
   const attachment = message.attachments.first();
-
   if (!attachment) return;
-
   if (!attachment.contentType?.startsWith("video/")) return;
 
   await message.reply("Converting video...");
 
   const id = Date.now();
-
   const input = `./input-${id}.mp4`;
   const output = `./output-${id}.gif`;
 
@@ -74,7 +72,6 @@ client.on("messageCreate", async (message) => {
     });
 
     const writer = fs.createWriteStream(input);
-
     response.data.pipe(writer);
 
     await new Promise((resolve, reject) => {
@@ -83,58 +80,37 @@ client.on("messageCreate", async (message) => {
       response.data.on("error", reject);
     });
 
-    /* ===================== START QUALITY ===================== */
-    let fps = 20;
-    let width = 640;
+    /* ===================== SMART START SETTINGS ===================== */
+    const fileSizeMB = (attachment.size || 0) / 1024 / 1024;
 
-    let attempts = 0;
+    let fps, width;
 
-    /* ===================== AUTO SIZE CONTROL ===================== */
-    while (attempts < 8) {
-      try {
-        await runFFmpeg(input, output, fps, width);
-      } catch (err) {
-        console.log("FFmpeg error:", err);
-        break;
-      }
+    if (fileSizeMB < 3) {
+      fps = 20;
+      width = 640;
+    } else if (fileSizeMB < 8) {
+      fps = 16;
+      width = 520;
+    } else {
+      fps = 12;
+      width = 420;
+    }
 
-      const size = fs.existsSync(output)
-        ? fs.statSync(output).size
-        : 0;
+    /* ===================== SINGLE OPTIMIZED RUN ===================== */
+    await runFFmpeg(input, output, fps, width);
 
-      console.log(
-        `Attempt ${attempts + 1}: ${(
-          size /
-          1024 /
-          1024
-        ).toFixed(2)}MB | ${width}w | ${fps}fps`
-      );
+    const size = fs.existsSync(output)
+      ? fs.statSync(output).size
+      : 0;
 
-      if (size && size <= MAX_SIZE) {
-        break;
-      }
+    /* ===================== AUTO DOWNGRADE ONCE (NOT LOOP SPAM) ===================== */
+    if (size > MAX_SIZE) {
+      fs.unlinkSync(output);
 
-      /* ===================== AUTO QUALITY REDUCTION ===================== */
+      fps = Math.max(10, fps - 4);
+      width = Math.max(320, width - 120);
 
-      if (width > 480) {
-        width -= 80;
-      } else if (width > 320) {
-        width -= 40;
-      }
-
-      if (fps > 12) {
-        fps -= 2;
-      }
-
-      if (width < 240 || fps < 8) {
-        break;
-      }
-
-      if (fs.existsSync(output)) {
-        fs.unlinkSync(output);
-      }
-
-      attempts++;
+      await runFFmpeg(input, output, fps, width);
     }
 
     /* ===================== SEND GIF ===================== */
@@ -143,32 +119,14 @@ client.on("messageCreate", async (message) => {
       return;
     }
 
-    try {
-      await message.reply({
-        files: [output],
-      });
-    } catch (err) {
-      console.log("Upload error:", err);
+    await message.reply({ files: [output] });
 
-      await message.reply(
-        "Failed to upload GIF (too large or Discord error)."
-      );
-    }
   } catch (err) {
-    console.log("General error:", err);
-
-    await message.reply(
-      "Something went wrong during conversion."
-    );
+    console.log("Error:", err);
+    await message.reply("Something went wrong during conversion.");
   } finally {
-    /* ===================== CLEANUP ===================== */
-    if (fs.existsSync(input)) {
-      fs.unlinkSync(input);
-    }
-
-    if (fs.existsSync(output)) {
-      fs.unlinkSync(output);
-    }
+    if (fs.existsSync(input)) fs.unlinkSync(input);
+    if (fs.existsSync(output)) fs.unlinkSync(output);
   }
 });
 

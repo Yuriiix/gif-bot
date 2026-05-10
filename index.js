@@ -28,17 +28,20 @@ client.once("ready", () => {
 /* ===================== CONFIG ===================== */
 const MAX_SIZE = 7 * 1024 * 1024;
 
-/* ===================== HELPERS ===================== */
+/* ===================== FFMPEG ===================== */
 function runFFmpeg(input, output, fps, width) {
   return new Promise((resolve, reject) => {
     ffmpeg(input)
       .outputOptions([
         "-t",
         "6",
+
         "-vf",
         `fps=${fps},scale=${width}:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=256:stats_mode=diff[p];[s1][p]paletteuse=dither=sierra2_4a`,
+
         "-loop",
         "0",
+
         "-preset",
         "veryfast",
       ])
@@ -48,35 +51,20 @@ function runFFmpeg(input, output, fps, width) {
   });
 }
 
-/* ===================== MESSAGE ===================== */
+/* ===================== MESSAGE EVENT ===================== */
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
 
   const attachment = message.attachments.first();
+
   if (!attachment) return;
+
   if (!attachment.contentType?.startsWith("video/")) return;
 
-  /* ===================== MODE DETECTION ===================== */
-  const content = message.content.toLowerCase();
-
-  let mode = "fast"; // default safe mode
-
-  if (content.includes("hd")) mode = "hd";
-  if (content.includes("fast")) mode = "fast";
-
-  let fps, width;
-
-  if (mode === "hd") {
-    fps = 24;
-    width = 720;
-  } else {
-    fps = 14;
-    width = 480;
-  }
-
-  await message.reply(`Converting video... (${mode.toUpperCase()} mode)`);
+  await message.reply("Converting video in HD...");
 
   const id = Date.now();
+
   const input = `./input-${id}.mp4`;
   const output = `./output-${id}.gif`;
 
@@ -98,10 +86,14 @@ client.on("messageCreate", async (message) => {
       response.data.on("error", reject);
     });
 
-    /* ===================== CONVERSION LOOP ===================== */
+    /* ===================== START HD SETTINGS ===================== */
+    let fps = 24;
+    let width = 720;
+
     let attempts = 0;
 
-    while (attempts < 3) {
+    /* ===================== AUTO SIZE CONTROL ===================== */
+    while (attempts < 4) {
       try {
         await runFFmpeg(input, output, fps, width);
       } catch (err) {
@@ -109,43 +101,61 @@ client.on("messageCreate", async (message) => {
         break;
       }
 
-      const size = fs.existsSync(output) ? fs.statSync(output).size : 0;
+      const size = fs.existsSync(output)
+        ? fs.statSync(output).size
+        : 0;
 
-      if (size && size <= MAX_SIZE) break;
-
-      // fallback reduce quality
-      if (mode === "hd") {
-        width -= 120;
-        fps -= 2;
-      } else {
-        width -= 80;
-        fps -= 2;
+      if (size && size <= MAX_SIZE) {
+        break;
       }
 
-      if (width < 320) break;
+      /* ===================== AUTO QUALITY REDUCTION ===================== */
+      width -= 120;
+      fps -= 2;
 
-      if (fs.existsSync(output)) fs.unlinkSync(output);
+      if (width < 320 || fps < 10) {
+        break;
+      }
+
+      if (fs.existsSync(output)) {
+        fs.unlinkSync(output);
+      }
+
       attempts++;
     }
 
-    /* ===================== SEND RESULT ===================== */
+    /* ===================== SEND GIF ===================== */
     if (!fs.existsSync(output)) {
       await message.reply("Conversion failed.");
       return;
     }
 
     try {
-      await message.reply({ files: [output] });
+      await message.reply({
+        files: [output],
+      });
     } catch (err) {
       console.log("Upload error:", err);
-      await message.reply("Failed to upload GIF (too large or Discord error).");
+
+      await message.reply(
+        "Failed to upload GIF (too large or Discord error)."
+      );
     }
   } catch (err) {
     console.log("General error:", err);
-    await message.reply("Something went wrong during conversion.");
+
+    await message.reply(
+      "Something went wrong during conversion."
+    );
   } finally {
-    if (fs.existsSync(input)) fs.unlinkSync(input);
-    if (fs.existsSync(output)) fs.unlinkSync(output);
+    /* ===================== CLEANUP ===================== */
+    if (fs.existsSync(input)) {
+      fs.unlinkSync(input);
+    }
+
+    if (fs.existsSync(output)) {
+      fs.unlinkSync(output);
+    }
   }
 });
 

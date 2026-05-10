@@ -39,14 +39,16 @@ function runFFmpeg(input, output, fps, width) {
   return new Promise((resolve, reject) => {
     ffmpeg(input)
       .outputOptions([
-        "-t", "5", // prevents long conversions freezing server
+        // ❌ NO TIME LIMIT (full video allowed)
 
         "-vf",
         `fps=${fps},scale=${width}:-1:flags=lanczos`,
 
         "-loop", "0",
+
+        // ⚡ faster encoding on Render
         "-preset", "veryfast",
-        "-threads", "2"
+        "-threads", "2",
       ])
       .save(output)
       .on("end", resolve)
@@ -59,8 +61,7 @@ client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
 
   const attachment = message.attachments.first();
-  if (!attachment) return;
-  if (!attachment.contentType?.startsWith("video/")) return;
+  if (!attachment || !attachment.contentType?.startsWith("video/")) return;
 
   await message.reply("Converting video...");
 
@@ -88,18 +89,19 @@ client.on("messageCreate", async (message) => {
     /* ===================== SMART QUALITY SYSTEM ===================== */
     const sizeMB = (attachment.size || 0) / 1024 / 1024;
 
-    let fps = 16;
-    let width = 480;
+    let fps = 18;
+    let width = 520;
 
+    // smarter scaling
     if (sizeMB < 3) {
-      fps = 18;
-      width = 560;
+      fps = 20;
+      width = 640;
     } else if (sizeMB > 8) {
-      fps = 12;
-      width = 360;
+      fps = 14;
+      width = 420;
     }
 
-    console.log(`Converting: ${fps}fps | ${width}px | ${sizeMB.toFixed(2)}MB`);
+    console.log(`Input: ${sizeMB.toFixed(2)}MB | ${fps}fps | ${width}px`);
 
     /* ===================== CONVERT ===================== */
     await runFFmpeg(input, output, fps, width);
@@ -111,7 +113,7 @@ client.on("messageCreate", async (message) => {
 
     const outSizeMB = fs.statSync(output).size / 1024 / 1024;
 
-    console.log(`Output size: ${outSizeMB.toFixed(2)}MB`);
+    console.log(`Output: ${outSizeMB.toFixed(2)}MB`);
 
     if (outSizeMB > 7) {
       await message.reply("GIF too large for Discord (try shorter video).");

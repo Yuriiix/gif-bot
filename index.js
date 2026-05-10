@@ -21,7 +21,7 @@ const client = new Client({
 const TOKEN = process.env.TOKEN;
 
 /* ===================== READY ===================== */
-client.once("ready", () => {
+client.once("clientReady", () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
@@ -33,9 +33,6 @@ function runFFmpeg(input, output, fps, width) {
   return new Promise((resolve, reject) => {
     ffmpeg(input)
       .outputOptions([
-        "-t",
-        "6",
-
         "-vf",
         `fps=${fps},scale=${width}:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=256:stats_mode=diff[p];[s1][p]paletteuse=dither=sierra2_4a`,
 
@@ -61,7 +58,7 @@ client.on("messageCreate", async (message) => {
 
   if (!attachment.contentType?.startsWith("video/")) return;
 
-  await message.reply("Converting video in HD...");
+  await message.reply("Converting video...");
 
   const id = Date.now();
 
@@ -86,14 +83,14 @@ client.on("messageCreate", async (message) => {
       response.data.on("error", reject);
     });
 
-    /* ===================== START HD SETTINGS ===================== */
-    let fps = 24;
-    let width = 720;
+    /* ===================== START QUALITY ===================== */
+    let fps = 20;
+    let width = 640;
 
     let attempts = 0;
 
     /* ===================== AUTO SIZE CONTROL ===================== */
-    while (attempts < 4) {
+    while (attempts < 8) {
       try {
         await runFFmpeg(input, output, fps, width);
       } catch (err) {
@@ -105,15 +102,31 @@ client.on("messageCreate", async (message) => {
         ? fs.statSync(output).size
         : 0;
 
+      console.log(
+        `Attempt ${attempts + 1}: ${(
+          size /
+          1024 /
+          1024
+        ).toFixed(2)}MB | ${width}w | ${fps}fps`
+      );
+
       if (size && size <= MAX_SIZE) {
         break;
       }
 
       /* ===================== AUTO QUALITY REDUCTION ===================== */
-      width -= 120;
-      fps -= 2;
 
-      if (width < 320 || fps < 10) {
+      if (width > 480) {
+        width -= 80;
+      } else if (width > 320) {
+        width -= 40;
+      }
+
+      if (fps > 12) {
+        fps -= 2;
+      }
+
+      if (width < 240 || fps < 8) {
         break;
       }
 

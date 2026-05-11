@@ -47,50 +47,64 @@ const DISCORD_LIMIT_MB = 7.8;
 
 /* ===================== HELPERS ===================== */
 
-function fileSizeMB(path) {
-  return fs.statSync(path).size / 1024 / 1024;
-}
-
 function deleteFile(path) {
   try {
-    if (fs.existsSync(path)) {
+    if (path && fs.existsSync(path)) {
       fs.unlinkSync(path);
     }
   } catch {}
 }
 
-/* ===================== HIGH QUALITY GIF ===================== */
+function getFileSizeMB(path) {
+  return fs.statSync(path).size / 1024 / 1024;
+}
 
-function runFFmpeg(input, output, fps, width) {
+function getVideoInfo(input) {
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(input, (err, data) => {
+      if (err) return reject(err);
+
+      const stream = data.streams.find(
+        s => s.codec_type === "video"
+      );
+
+      resolve({
+        width: stream.width,
+        height: stream.height,
+        duration: Number(stream.duration || data.format.duration || 0),
+      });
+    });
+  });
+}
+
+/* ===================== GIF ENCODER ===================== */
+
+function createGif(input, output, fps, width) {
   return new Promise((resolve, reject) => {
 
-    const palette = `./palette-${Date.now()}.png`;
-
-    /* ---------- STEP 1: GENERATE PALETTE ---------- */
+    const palette = `palette-${Date.now()}.png`;
 
     ffmpeg(input)
       .outputOptions([
         "-vf",
-        `fps=${fps},scale=${width}:-1:flags=lanczos,palettegen=stats_mode=diff:max_colors=256`,
+        `fps=${fps},scale=${width}:-1:flags=lanczos,palettegen=max_colors=256`
       ])
       .save(palette)
-      .on("end", () => {
 
-        /* ---------- STEP 2: CREATE GIF ---------- */
+      .on("end", () => {
 
         ffmpeg(input)
           .input(palette)
           .complexFilter([
-            `fps=${fps},scale=${width}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle`
+            `fps=${fps},scale=${width}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a`
           ])
           .outputOptions([
             "-loop", "0",
 
-            // better compression
+            // faster + cleaner
             "-gifflags", "-offsetting",
 
             // stability
-            "-preset", "veryfast",
             "-threads", "2",
           ])
           .format("gif")
@@ -124,6 +138,7 @@ client.on("messageCreate", async (message) => {
   let output = null;
 
   try {
+
     if (message.author.bot) return;
 
     const attachment = message.attachments.first();
@@ -136,13 +151,13 @@ client.on("messageCreate", async (message) => {
     }
 
     await message.reply(
-      "Converting video to high-quality GIF..."
+      "Creating high-quality GIF..."
     );
 
     const id = Date.now();
 
-    input = `./input-${id}.mp4`;
-    output = `./output-${id}.gif`;
+    input = `input-${id}.mp4`;
+    output = `output-${id}.gif`;
 
     /* ===================== DOWNLOAD ===================== */
 
@@ -164,38 +179,57 @@ client.on("messageCreate", async (message) => {
       response.data.on("error", reject);
     });
 
-    /* ===================== QUALITY PRESETS ===================== */
+    /* ===================== VIDEO INFO ===================== */
 
-    const presets = [
-      { fps: 20, width: 720 },
-      { fps: 18, width: 640 },
-      { fps: 16, width: 560 },
-      { fps: 14, width: 480 },
-      { fps: 12, width: 420 },
-    ];
+    const info = await getVideoInfo(input);
+
+    console.log(info);
+
+    /* ===================== SMART QUALITY ===================== */
+
+    let fps = 20;
+    let width = 720;
+
+    // long videos need lower settings
+    if (info.duration > 8) {
+      fps = 16;
+      width = 640;
+    }
+
+    if (info.duration > 15) {
+      fps = 14;
+      width = 560;
+    }
+
+    // huge source videos
+    if (info.width >= 1920) {
+      width -= 80;
+    }
+
+    /* ===================== AUTO FIT LOOP ===================== */
 
     let success = false;
 
-    for (const preset of presets) {
+    for (let i = 0; i < 6; i++) {
 
       deleteFile(output);
 
       console.log(
-        `Trying ${preset.fps}fps @ ${preset.width}px`
+        `Trying ${fps}fps @ ${width}px`
       );
 
-      await runFFmpeg(
+      await createGif(
         input,
         output,
-        preset.fps,
-        preset.width
+        fps,
+        width
       );
 
       if (!fs.existsSync(output)) {
         continue;
       }
 
-      const size = fileSizeMB(output);
+      const size = getFileSizeMB(output);
 
       console.log(
         `GIF Size: ${size.toFixed(2)}MB`
@@ -205,6 +239,13 @@ client.on("messageCreate", async (message) => {
         success = true;
         break;
       }
+
+      // shrink intelligently
+      width -= 60;
+
+      if (fps > 12) {
+        fps -= 2;
+      }
     }
 
     /* ===================== RESULT ===================== */
@@ -212,7 +253,7 @@ client.on("messageCreate", async (message) => {
     if (!success) {
 
       await message.reply(
-        "Video is too large to safely convert into a Discord GIF."
+        "Video is too large for Discord GIF limits."
       );
 
       return;

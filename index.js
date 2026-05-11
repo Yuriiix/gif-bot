@@ -7,6 +7,7 @@ const {
 } = require("discord.js");
 
 const fs = require("fs");
+const path = require("path");
 const axios = require("axios");
 const ffmpeg = require("fluent-ffmpeg");
 const ffmpegPath = require("ffmpeg-static");
@@ -25,14 +26,21 @@ const client = new Client({
 
 const TOKEN = process.env.TOKEN;
 
+if (!TOKEN) {
+  console.error("TOKEN environment variable missing");
+  process.exit(1);
+}
+
 /* ===================== EXPRESS ===================== */
 
 app.get("/", (_, res) => {
-  res.send("Bot alive");
+  res.status(200).send("Bot alive");
 });
 
-app.listen(process.env.PORT || 3000, () => {
-  console.log("Web server running");
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(`Web server running on ${PORT}`);
 });
 
 /* ===================== READY ===================== */
@@ -45,89 +53,137 @@ client.once("clientReady", () => {
 
 const DISCORD_LIMIT_MB = 7.8;
 
+const MAX_VIDEO_MB = 50;
+
+const TEMP_DIR = path.join(__dirname, "temp");
+
+if (!fs.existsSync(TEMP_DIR)) {
+  fs.mkdirSync(TEMP_DIR);
+}
+
 /* ===================== HELPERS ===================== */
 
-function deleteFile(path) {
+function safeDelete(file) {
   try {
-    if (path && fs.existsSync(path)) {
-      fs.unlinkSync(path);
+    if (file && fs.existsSync(file)) {
+      fs.unlinkSync(file);
     }
-  } catch {}
+  } catch (err) {
+    console.error("Delete error:", err);
+  }
 }
 
-function getFileSizeMB(path) {
-  return fs.statSync(path).size / 1024 / 1024;
+function getFileSizeMB(file) {
+  return fs.statSync(file).size / 1024 / 1024;
 }
 
-function getVideoInfo(input) {
+function waitForStream(writer) {
   return new Promise((resolve, reject) => {
-    ffmpeg.ffprobe(input, (err, data) => {
-      if (err) return reject(err);
+    writer.on("finish", resolve);
+    writer.on("error", reject);
+  });
+}
 
-      const stream = data.streams.find(
-        s => s.codec_type === "video"
-      );
+function ffprobeAsync(file) {
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(file, (err, data) => {
+      if (err) {
+        reject(err);
+        return;
+      }
 
-      resolve({
-        width: stream.width,
-        height: stream.height,
-        duration: Number(stream.duration || data.format.duration || 0),
-      });
+      resolve(data);
     });
   });
 }
 
-/* ===================== GIF ENCODER ===================== */
+/* ===================== VIDEO INFO ===================== */
 
-function createGif(input, output, fps, width) {
+async function getVideoInfo(file) {
+
+  const data = await ffprobeAsync(file);
+
+  const stream = data.streams.find(
+    s => s.codec_type === "video"
+  );
+
+  if (!stream) {
+    throw new Error("No video stream found");
+  }
+
+  return {
+    width: stream.width || 1280,
+    height: stream.height || 720,
+    duration: Number(
+      stream.duration ||
+      data.format.duration ||
+      0
+    ),
+  };
+}
+
+/* ===================== GIF CREATION ===================== */
+
+function createGif(
+  input,
+  output,
+  fps,
+  width,
+  palette
+) {
+
   return new Promise((resolve, reject) => {
 
-    const palette = `palette-${Date.now()}.png`;
+    /* ---------- PALETTE ---------- */
 
     ffmpeg(input)
+
       .outputOptions([
         "-vf",
         `fps=${fps},scale=${width}:-1:flags=lanczos,palettegen=max_colors=256`
       ])
+
       .save(palette)
 
       .on("end", () => {
 
+        /* ---------- FINAL GIF ---------- */
+
         ffmpeg(input)
+
           .input(palette)
+
           .complexFilter([
             `fps=${fps},scale=${width}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a`
           ])
+
           .outputOptions([
             "-loop", "0",
 
-            // faster + cleaner
+            // optimization
             "-gifflags", "-offsetting",
 
-            // stability
+            // speed
             "-threads", "2",
+
+            // overwrite
+            "-y",
           ])
+
           .format("gif")
+
           .save(output)
 
-          .on("end", () => {
-            deleteFile(palette);
-            resolve();
-          })
+          .on("end", resolve)
 
-          .on("error", (err) => {
-            deleteFile(palette);
-            reject(err);
-          });
+          .on("error", reject);
 
       })
 
-      .on("error", (err) => {
-        deleteFile(palette);
-        reject(err);
-      });
+      .on("error", reject);
 
   });
+
 }
 
 /* ===================== MESSAGE EVENT ===================== */
@@ -136,6 +192,7 @@ client.on("messageCreate", async (message) => {
 
   let input = null;
   let output = null;
+  let palette = null;
 
   try {
 
@@ -143,21 +200,48 @@ client.on("messageCreate", async (message) => {
 
     const attachment = message.attachments.first();
 
+    if (!attachment) return;
+
     if (
-      !attachment ||
-      !attachment.contentType?.startsWith("video/")
+      !attachment.contentType ||
+      !attachment.contentType.startsWith("video/")
     ) {
       return;
     }
 
-    await message.reply(
+    if (
+      attachment.size >
+      MAX_VIDEO_MB * 1024 * 1024
+    ) {
+
+      await message.reply(
+        `Video exceeds ${MAX_VIDEO_MB}MB limit.`
+      );
+
+      return;
+    }
+
+    const progressMessage = await message.reply(
       "Creating high-quality GIF..."
     );
 
-    const id = Date.now();
+    const id =
+      `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 
-    input = `input-${id}.mp4`;
-    output = `output-${id}.gif`;
+    input = path.join(
+      TEMP_DIR,
+      `input-${id}.mp4`
+    );
+
+    output = path.join(
+      TEMP_DIR,
+      `output-${id}.gif`
+    );
+
+    palette = path.join(
+      TEMP_DIR,
+      `palette-${id}.png`
+    );
 
     /* ===================== DOWNLOAD ===================== */
 
@@ -166,18 +250,16 @@ client.on("messageCreate", async (message) => {
       method: "GET",
       responseType: "stream",
       timeout: 30000,
-      maxContentLength: 50 * 1024 * 1024,
+      maxContentLength:
+        MAX_VIDEO_MB * 1024 * 1024,
     });
 
-    const writer = fs.createWriteStream(input);
+    const writer =
+      fs.createWriteStream(input);
 
     response.data.pipe(writer);
 
-    await new Promise((resolve, reject) => {
-      writer.on("finish", resolve);
-      writer.on("error", reject);
-      response.data.on("error", reject);
-    });
+    await waitForStream(writer);
 
     /* ===================== VIDEO INFO ===================== */
 
@@ -190,9 +272,8 @@ client.on("messageCreate", async (message) => {
     let fps = 20;
     let width = 720;
 
-    // long videos need lower settings
     if (info.duration > 8) {
-      fps = 16;
+      fps = 18;
       width = 640;
     }
 
@@ -201,38 +282,57 @@ client.on("messageCreate", async (message) => {
       width = 560;
     }
 
-    // huge source videos
+    if (info.duration > 25) {
+      fps = 12;
+      width = 480;
+    }
+
+    // ultra HD source
     if (info.width >= 1920) {
       width -= 80;
     }
 
-    /* ===================== AUTO FIT LOOP ===================== */
+    // vertical video boost
+    if (info.height > info.width) {
+      width -= 40;
+    }
+
+    width = Math.max(width, 320);
+
+    /* ===================== AUTO FIT ===================== */
 
     let success = false;
 
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 7; i++) {
 
-      deleteFile(output);
+      safeDelete(output);
+      safeDelete(palette);
 
       console.log(
-        `Trying ${fps}fps @ ${width}px`
+        `Attempt ${i + 1} | ${fps}fps @ ${width}px`
+      );
+
+      await progressMessage.edit(
+        `Creating GIF...\nAttempt ${i + 1}/7`
       );
 
       await createGif(
         input,
         output,
         fps,
-        width
+        width,
+        palette
       );
 
       if (!fs.existsSync(output)) {
         continue;
       }
 
-      const size = getFileSizeMB(output);
+      const size =
+        getFileSizeMB(output);
 
       console.log(
-        `GIF Size: ${size.toFixed(2)}MB`
+        `GIF size: ${size.toFixed(2)}MB`
       );
 
       if (size <= DISCORD_LIMIT_MB) {
@@ -240,43 +340,56 @@ client.on("messageCreate", async (message) => {
         break;
       }
 
-      // shrink intelligently
+      // intelligent scaling
       width -= 60;
 
-      if (fps > 12) {
+      if (fps > 10) {
         fps -= 2;
       }
+
+      width = Math.max(width, 280);
     }
 
     /* ===================== RESULT ===================== */
 
     if (!success) {
 
-      await message.reply(
+      await progressMessage.edit(
         "Video is too large for Discord GIF limits."
       );
 
       return;
     }
 
+    await progressMessage.edit(
+      "Uploading GIF..."
+    );
+
     await message.reply({
       files: [output],
     });
 
-    console.log("GIF sent successfully");
+    await progressMessage.delete().catch(() => {});
+
+    console.log(
+      "GIF sent successfully"
+    );
 
   } catch (err) {
 
     console.error(err);
 
-    await message.reply(
-      "Conversion failed."
-    );
+    try {
+      await message.reply(
+        "Conversion failed."
+      );
+    } catch {}
 
   } finally {
 
-    deleteFile(input);
-    deleteFile(output);
+    safeDelete(input);
+    safeDelete(output);
+    safeDelete(palette);
 
   }
 

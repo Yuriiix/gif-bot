@@ -1,11 +1,7 @@
 const express = require("express");
 const app = express();
 
-const {
-  Client,
-  GatewayIntentBits,
-} = require("discord.js");
-
+const { Client, GatewayIntentBits } = require("discord.js");
 const fs = require("fs");
 const axios = require("axios");
 const ffmpeg = require("fluent-ffmpeg");
@@ -35,34 +31,67 @@ app.listen(process.env.PORT || 3000, () => {
 
 /* ===================== READY ===================== */
 
-client.once("clientReady", () => {
+client.once("ready", () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
 /* ===================== SETTINGS ===================== */
 
-const MAX_MB = 7.5; // Discord safe limit
+const MAX_MB = 7.5;
+
+/* ===================== HELPERS ===================== */
+
+const wait = (r, j) =>
+  (err) => (err ? j(err) : r());
+
+function safeDelete(file) {
+  try {
+    if (file && fs.existsSync(file)) fs.unlinkSync(file);
+  } catch {}
+}
+
+/* ===================== FFmpeg ===================== */
+
+function convertGif(input, output, fps, width) {
+  return new Promise((resolve, reject) => {
+    ffmpeg(input)
+      .outputOptions([
+        "-vf",
+        `fps=${fps},scale=${width}:-1:flags=lanczos`,
+        "-loop",
+        "0",
+        "-preset",
+        "veryfast",
+        "-threads",
+        "2",
+      ])
+      .format("gif")
+      .on("end", resolve)
+      .on("error", reject)
+      .save(output);
+  });
+}
 
 /* ===================== MESSAGE ===================== */
 
 client.on("messageCreate", async (message) => {
-
   if (message.author.bot) return;
 
   const file = message.attachments.first();
-
   if (!file) return;
 
-  // accept any video type
-  if (!file.contentType?.startsWith("video/")) return;
+  const isVideo =
+    file.contentType?.startsWith("video/") ||
+    file.url.match(/\.(mp4|mov|webm|mkv|avi)$/i);
+
+  if (!isVideo) return;
 
   const id = Date.now();
   const input = `input-${id}.mp4`;
   const output = `output-${id}.gif`;
 
   try {
-
-    await message.reply("Converting video to GIF...");
+    await message.reply("Converting video...");
 
     /* ===================== DOWNLOAD ===================== */
 
@@ -70,92 +99,58 @@ client.on("messageCreate", async (message) => {
       url: file.url,
       method: "GET",
       responseType: "stream",
+      timeout: 60000,
     });
 
     const writer = fs.createWriteStream(input);
     res.data.pipe(writer);
 
-    await new Promise((resolve, reject) => {
-      writer.on("finish", resolve);
-      writer.on("error", reject);
-    });
+    await new Promise(wait(writer.once.bind(writer, "finish")));
 
-    /* ===================== CONVERT (FAST + CLEAN) ===================== */
+    /* ===================== SMART SETTINGS ===================== */
 
-    await new Promise((resolve, reject) => {
+    const sizeMB = file.size / 1024 / 1024;
 
-      ffmpeg(input)
+    let fps = 15;
+    let width = 540;
 
-        .outputOptions([
-          // quality + speed balance
-          "-vf",
-          "fps=15,scale=540:-1:flags=lanczos",
-
-          // keep looping GIF
-          "-loop", "0",
-
-          // faster encoding
-          "-preset", "veryfast",
-          "-threads", "2",
-        ])
-
-        .format("gif")
-        .save(output)
-
-        .on("end", resolve)
-        .on("error", reject);
-
-    });
-
-    /* ===================== SIZE CHECK ===================== */
-
-    const sizeMB =
-      fs.statSync(output).size / 1024 / 1024;
-
-    if (sizeMB > MAX_MB) {
-
-      // fallback: lower quality automatically once
-      fs.unlinkSync(output);
-
-      await new Promise((resolve, reject) => {
-
-        ffmpeg(input)
-
-          .outputOptions([
-            "-vf",
-            "fps=12,scale=420:-1:flags=lanczos",
-            "-loop", "0",
-            "-preset", "veryfast",
-            "-threads", "2",
-          ])
-
-          .format("gif")
-          .save(output)
-
-          .on("end", resolve)
-          .on("error", reject);
-
-      });
+    if (sizeMB > 5) {
+      fps = 12;
+      width = 480;
     }
 
-    /* ===================== SEND ===================== */
+    if (sizeMB > 10) {
+      fps = 10;
+      width = 420;
+    }
+
+    /* ===================== CONVERT ===================== */
+
+    await convertGif(input, output, fps, width);
+
+    if (!fs.existsSync(output)) {
+      await message.reply("Conversion failed.");
+      return;
+    }
+
+    const outSize = fs.statSync(output).size / 1024 / 1024;
+
+    if (outSize > MAX_MB) {
+      await message.reply("Video too large for Discord GIF limits.");
+      return;
+    }
 
     await message.reply({
       files: [output],
     });
 
   } catch (err) {
-
     console.error(err);
-    await message.reply("Failed to convert video.");
-
+    await message.reply("Conversion failed.");
   } finally {
-
-    if (fs.existsSync(input)) fs.unlinkSync(input);
-    if (fs.existsSync(output)) fs.unlinkSync(output);
-
+    safeDelete(input);
+    safeDelete(output);
   }
-
 });
 
 /* ===================== LOGIN ===================== */

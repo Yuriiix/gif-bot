@@ -9,6 +9,7 @@ const ffmpegPath = require('ffmpeg-static');
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
+/* ===================== DISCORD CLIENT ===================== */
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -49,13 +50,17 @@ client.on('messageCreate', async (message) => {
 
   const writer = fs.createWriteStream(input);
 
+  // Handle download errors
   writer.on('error', (err) => {
     console.log("Download error:", err);
   });
 
-  writer.on('finish', () => {
+  response.data.on('error', (err) => {
+    console.log("Stream error:", err);
+  });
 
-    /* ===================== CONVERT TO GIF ===================== */
+  // When download is finished → convert
+  writer.on('finish', () => {
     ffmpeg(input)
       .outputOptions([
         '-vf',
@@ -77,10 +82,11 @@ client.on('messageCreate', async (message) => {
       });
   });
 
+  // Start download
   response.data.pipe(writer);
 });
 
-/* ===================== EXPRESS SERVER (RENDER FIX) ===================== */
+/* ===================== EXPRESS (RENDER KEEP-ALIVE) ===================== */
 app.get("/", (req, res) => {
   res.send("Bot is alive");
 });

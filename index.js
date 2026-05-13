@@ -72,29 +72,29 @@ function download(url, path) {
 
 /* ===================== HIGH QUALITY GIF ===================== */
 
-function convertToGif(input, output) {
+function convertToGif(input, output, fps, width) {
   const palette = `palette-${Date.now()}.png`;
 
   return new Promise((resolve, reject) => {
 
-    /* ---------- GENERATE PALETTE ---------- */
+    /* ---------- PALETTE ---------- */
 
     ffmpeg(input)
       .outputOptions([
         "-vf",
-        "fps=15,scale=480:-1:flags=lanczos,palettegen"
+        `fps=${fps},scale=${width}:-1:flags=lanczos,palettegen`
       ])
       .save(palette)
 
       .on("end", () => {
 
-        /* ---------- CREATE GIF ---------- */
+        /* ---------- GIF ---------- */
 
         ffmpeg(input)
           .input(palette)
 
           .complexFilter([
-            "fps=15,scale=480:-1:flags=lanczos[x]",
+            `fps=${fps},scale=${width}:-1:flags=lanczos[x]`,
             "[x][1:v]paletteuse=dither=sierra2_4a"
           ])
 
@@ -138,13 +138,14 @@ client.on("messageCreate", async (message) => {
 
   const file = message.attachments.first();
 
-  if (
-    !file ||
-    !(
+  const isVideo =
+    file &&
+    (
       file.contentType?.startsWith("video/") ||
       /\.(mp4|mov|webm|mkv|avi)$/i.test(file.url)
-    )
-  ) {
+    );
+
+  if (!isVideo) {
     processing.delete(message.id);
     return;
   }
@@ -162,24 +163,57 @@ client.on("messageCreate", async (message) => {
 
     await download(file.url, input);
 
-    /* ---------- CONVERT ---------- */
+    /* ---------- AUTO QUALITY SYSTEM ---------- */
 
-    await convertToGif(input, output);
+    const presets = [
+      { fps: 15, width: 480 },
+      { fps: 12, width: 420 },
+      { fps: 10, width: 360 },
+      { fps: 8, width: 320 },
+    ];
 
-    if (!fs.existsSync(output)) {
-      await message.reply("Conversion failed.");
-      return;
+    let success = false;
+
+    for (const preset of presets) {
+
+      clean(output);
+
+      console.log(
+        `Trying ${preset.width}px @ ${preset.fps}fps`
+      );
+
+      await convertToGif(
+        input,
+        output,
+        preset.fps,
+        preset.width
+      );
+
+      if (!fs.existsSync(output)) {
+        continue;
+      }
+
+      const sizeMB =
+        fs.statSync(output).size / 1024 / 1024;
+
+      console.log(
+        `Result: ${sizeMB.toFixed(2)}MB`
+      );
+
+      if (sizeMB <= 7.5) {
+        success = true;
+        break;
+      }
     }
 
-    /* ---------- SIZE CHECK ---------- */
+    /* ---------- FAILED ---------- */
 
-    const sizeMB =
-      fs.statSync(output).size / 1024 / 1024;
+    if (!success) {
 
-    if (sizeMB > 7.5) {
       await message.reply(
-        "GIF too large for Discord."
+        "Video too large to convert into a Discord-safe GIF."
       );
+
       return;
     }
 

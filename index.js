@@ -38,44 +38,58 @@ client.once("ready", () => {
 /* ===================== SETTINGS ===================== */
 
 const MAX_MB = 7.5;
+let busy = false; // prevents crashes from multiple conversions
 
 /* ===================== HELPERS ===================== */
 
-const wait = (r, j) =>
-  (err) => (err ? j(err) : r());
-
-function safeDelete(file) {
+function clean(file) {
   try {
     if (file && fs.existsSync(file)) fs.unlinkSync(file);
   } catch {}
 }
 
-/* ===================== FFmpeg ===================== */
-
-function convertGif(input, output, fps, width) {
+function run(cmd) {
   return new Promise((resolve, reject) => {
+    cmd.on("end", resolve).on("error", reject);
+  });
+}
+
+/* ===================== CORE CONVERSION ===================== */
+
+async function convertGif(input, output) {
+  const palette = `palette-${Date.now()}.png`;
+
+  // STEP 1: create palette (fixes pixel/noise issues)
+  await run(
     ffmpeg(input)
       .outputOptions([
         "-vf",
-        `fps=${fps},scale=${width}:-1:flags=lanczos`,
+        "fps=15,scale=480:-1:flags=lanczos,palettegen"
+      ])
+      .save(palette)
+  );
+
+  // STEP 2: apply palette (high quality GIF)
+  await run(
+    ffmpeg(input)
+      .input(palette)
+      .outputOptions([
+        "-vf",
+        "fps=15,scale=480:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=3",
         "-loop",
         "0",
-        "-preset",
-        "veryfast",
-        "-threads",
-        "2",
       ])
-      .format("gif")
-      .on("end", resolve)
-      .on("error", reject)
-      .save(output);
-  });
+      .save(output)
+  );
+
+  clean(palette);
 }
 
 /* ===================== MESSAGE ===================== */
 
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
+  if (busy) return message.reply("Bot is busy, try again in a moment.");
 
   const file = message.attachments.first();
   if (!file) return;
@@ -91,9 +105,11 @@ client.on("messageCreate", async (message) => {
   const output = `output-${id}.gif`;
 
   try {
+    busy = true;
+
     await message.reply("Converting video...");
 
-    /* ===================== DOWNLOAD ===================== */
+    /* ================= DOWNLOAD ================= */
 
     const res = await axios({
       url: file.url,
@@ -105,51 +121,40 @@ client.on("messageCreate", async (message) => {
     const writer = fs.createWriteStream(input);
     res.data.pipe(writer);
 
-    await new Promise(wait(writer.once.bind(writer, "finish")));
+    await new Promise((resolve, reject) => {
+      writer.on("finish", resolve);
+      writer.on("error", reject);
+    });
 
-    /* ===================== SMART SETTINGS ===================== */
+    /* ================= CONVERT ================= */
 
-    const sizeMB = file.size / 1024 / 1024;
-
-    let fps = 15;
-    let width = 540;
-
-    if (sizeMB > 5) {
-      fps = 12;
-      width = 480;
-    }
-
-    if (sizeMB > 10) {
-      fps = 10;
-      width = 420;
-    }
-
-    /* ===================== CONVERT ===================== */
-
-    await convertGif(input, output, fps, width);
+    await convertGif(input, output);
 
     if (!fs.existsSync(output)) {
-      await message.reply("Conversion failed.");
-      return;
+      return message.reply("Conversion failed.");
     }
 
-    const outSize = fs.statSync(output).size / 1024 / 1024;
+    /* ================= SIZE CHECK ================= */
 
-    if (outSize > MAX_MB) {
-      await message.reply("Video too large for Discord GIF limits.");
-      return;
+    const sizeMB = fs.statSync(output).size / 1024 / 1024;
+
+    if (sizeMB > MAX_MB) {
+      return message.reply(
+        "GIF too large. Try a shorter or lower-motion video."
+      );
     }
 
-    await message.reply({
-      files: [output],
-    });
+    /* ================= SEND ================= */
+
+    await message.reply({ files: [output] });
 
   } catch (err) {
     console.error(err);
     await message.reply("Conversion failed.");
   } finally {
-    safeDelete(input);
-    safeDelete(output);
+    busy = false;
+    clean(input);
+    clean(output);
   }
 });
 

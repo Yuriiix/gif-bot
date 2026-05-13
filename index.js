@@ -21,9 +21,8 @@ const client = new Client({
 
 const TOKEN = process.env.TOKEN;
 
-/* ===================== STATE (IMPORTANT) ===================== */
-
-let processing = false;
+/* ===================== STATE LOCK ===================== */
+let busy = false;
 
 /* ===================== EXPRESS ===================== */
 
@@ -41,7 +40,7 @@ client.once("ready", () => {
 
 /* ===================== HELPERS ===================== */
 
-function deleteFile(file) {
+function clean(file) {
   try {
     if (file && fs.existsSync(file)) fs.unlinkSync(file);
   } catch {}
@@ -57,12 +56,12 @@ function download(url, path) {
         timeout: 120000,
       });
 
-      const writer = fs.createWriteStream(path);
+      const stream = fs.createWriteStream(path);
 
-      res.data.pipe(writer);
+      res.data.pipe(stream);
 
-      writer.on("finish", resolve);
-      writer.on("error", reject);
+      stream.on("finish", resolve);
+      stream.on("error", reject);
       res.data.on("error", reject);
     } catch (err) {
       reject(err);
@@ -70,13 +69,14 @@ function download(url, path) {
   });
 }
 
-/* ===================== HIGH QUALITY GIF ===================== */
+/* ===================== GIF CONVERSION (PROPER PIPELINE) ===================== */
 
-function convertGif(input, output) {
+function convertToGif(input, output) {
   const palette = `palette-${Date.now()}.png`;
 
   return new Promise((resolve, reject) => {
-    // STEP 1: palette (QUALITY FIX)
+
+    // STEP 1: palette generation (quality fix)
     ffmpeg(input)
       .outputOptions([
         "-vf",
@@ -85,28 +85,29 @@ function convertGif(input, output) {
       .save(palette)
       .on("end", () => {
 
-        // STEP 2: apply palette
+        // STEP 2: apply palette (final GIF)
         ffmpeg(input)
           .input(palette)
           .outputOptions([
             "-vf",
-            "fps=12,scale=480:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer",
+            "fps=12,scale=480:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a",
             "-loop",
             "0"
           ])
           .format("gif")
           .on("end", () => {
-            deleteFile(palette);
+            clean(palette);
             resolve();
           })
           .on("error", (err) => {
-            deleteFile(palette);
+            clean(palette);
             reject(err);
           })
           .save(output);
+
       })
       .on("error", (err) => {
-        deleteFile(palette);
+        clean(palette);
         reject(err);
       });
   });
@@ -116,30 +117,28 @@ function convertGif(input, output) {
 
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
-  if (processing) return;
+  if (busy) return;
 
   const file = message.attachments.first();
   if (!file || !file.contentType?.startsWith("video/")) return;
 
-  processing = true;
+  busy = true;
 
   const id = Date.now();
   const input = `input-${id}.mp4`;
   const output = `output-${id}.gif`;
 
-  let statusMsg;
-
   try {
-    statusMsg = await message.reply("Converting video...");
+    await message.reply("Converting video to GIF...");
 
     await download(file.url, input);
 
-    await convertGif(input, output);
+    await convertToGif(input, output);
 
     const sizeMB = fs.statSync(output).size / 1024 / 1024;
 
     if (sizeMB > 7.5) {
-      await message.reply("GIF too large for Discord.");
+      await message.reply("GIF too large for Discord limit.");
       return;
     }
 
@@ -149,9 +148,9 @@ client.on("messageCreate", async (message) => {
     console.error("ERROR:", err);
     await message.reply("Conversion failed.");
   } finally {
-    processing = false;
-    deleteFile(input);
-    deleteFile(output);
+    busy = false;
+    clean(input);
+    clean(output);
   }
 });
 

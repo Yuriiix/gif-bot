@@ -2,16 +2,14 @@ const express = require("express");
 const app = express();
 
 const { Client, GatewayIntentBits } = require("discord.js");
-
 const fs = require("fs");
 const axios = require("axios");
-
 const ffmpeg = require("fluent-ffmpeg");
 const ffmpegPath = require("ffmpeg-static");
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
-/* ===================== DISCORD ===================== */
+/* ===================== BOT ===================== */
 
 const client = new Client({
   intents: [
@@ -25,247 +23,129 @@ const TOKEN = process.env.TOKEN;
 
 /* ===================== EXPRESS ===================== */
 
-app.get("/", (_, res) => {
-  res.send("Bot alive");
-});
+app.get("/", (_, res) => res.send("Bot alive"));
+app.listen(process.env.PORT || 3000);
 
-app.listen(process.env.PORT || 3000, () => {
-  console.log("Web server running");
-});
+/* ===================== STATE ===================== */
 
-/* ===================== READY ===================== */
-
-client.once("ready", () => {
-  console.log(`Logged in as ${client.user.tag}`);
-});
-
-/* ===================== SETTINGS ===================== */
-
-const MAX_MB = 7.5;
-
-const activeJobs = new Set();
+let busy = false;
 
 /* ===================== HELPERS ===================== */
 
-function clean(file) {
-  try {
-    if (file && fs.existsSync(file)) {
-      fs.unlinkSync(file);
-    }
-  } catch {}
-}
+const clean = (f) => {
+  try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch {}
+};
 
-async function download(url, path) {
-
-  const response = await axios({
+const download = (url, path) =>
+  axios({
     url,
     method: "GET",
     responseType: "stream",
     timeout: 120000,
+  }).then(res => {
+    const stream = fs.createWriteStream(path);
+    res.data.pipe(stream);
+
+    return new Promise((resv, rej) => {
+      stream.on("finish", resv);
+      stream.on("error", rej);
+    });
   });
 
-  return new Promise((resolve, reject) => {
+/* ===================== FFmpeg (HIGH QUALITY + FAST) ===================== */
 
-    const writer = fs.createWriteStream(path);
-
-    response.data.pipe(writer);
-
-    writer.on("finish", resolve);
-    writer.on("error", reject);
-
-    response.data.on("error", reject);
-
-  });
-}
-
-/* ===================== HIGH QUALITY GIF ===================== */
-
-function makeGif(input, output, fps, width) {
-
+function convertGif(input, output, fps, width) {
   const palette = `palette-${Date.now()}.png`;
 
   return new Promise((resolve, reject) => {
-
-    /* ---------- CREATE PALETTE ---------- */
-
+    // STEP 1: palette (quality boost)
     ffmpeg(input)
-
       .outputOptions([
-        "-vf",
-        `fps=${fps},scale=${width}:-1:flags=lanczos,palettegen=max_colors=256`
+        `-vf fps=${fps},scale=${width}:-1:flags=lanczos,palettegen`
       ])
-
       .save(palette)
-
       .on("end", () => {
 
-        /* ---------- CREATE GIF ---------- */
-
-        const command = ffmpeg(input)
-
+        // STEP 2: gif encode
+        ffmpeg(input)
           .input(palette)
-
-          .complexFilter([
-            `fps=${fps},scale=${width}:-1:flags=lanczos[x]`,
-            "[x][1:v]paletteuse=dither=bayer:bayer_scale=3"
-          ])
-
           .outputOptions([
-            "-loop",
-            "0",
-
-            "-gifflags",
-            "-offsetting",
-
-            "-threads",
-            "2",
+            "-lavfi",
+            `fps=${fps},scale=${width}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a`,
+            "-loop 0"
           ])
-
-          .outputFormat("gif")
-
+          .format("gif")
           .on("end", () => {
             clean(palette);
             resolve();
           })
-
           .on("error", (err) => {
             clean(palette);
             reject(err);
           })
-
           .save(output);
-
-        /* ---------- TIMEOUT SAFETY ---------- */
-
-        setTimeout(() => {
-          try {
-            command.kill("SIGKILL");
-          } catch {}
-        }, 60000);
-
       })
-
       .on("error", (err) => {
         clean(palette);
         reject(err);
       });
-
   });
 }
 
 /* ===================== MESSAGE ===================== */
 
 client.on("messageCreate", async (message) => {
-
-  if (message.author.bot) return;
-
-  if (activeJobs.has(message.id)) return;
+  if (message.author.bot || busy) return;
 
   const file = message.attachments.first();
+  if (!file || !file.contentType?.startsWith("video/")) return;
 
-  if (!file) return;
-
-  const isVideo =
-    file.contentType?.startsWith("video/") ||
-    /\.(mp4|mov|webm|mkv|avi)$/i.test(file.url);
-
-  if (!isVideo) return;
-
-  activeJobs.add(message.id);
+  busy = true;
 
   const id = Date.now();
-
   const input = `input-${id}.mp4`;
   const output = `output-${id}.gif`;
 
   try {
-
-    await message.reply("Converting video...");
-
-    /* ---------- DOWNLOAD ---------- */
-
     await download(file.url, input);
 
-    /* ---------- SMART QUALITY PRESETS ---------- */
+    const sizeMB = (file.size || 5) / 1024 / 1024;
 
-    const presets = [
-      { fps: 20, width: 640 },
-      { fps: 18, width: 560 },
-      { fps: 15, width: 480 },
-      { fps: 12, width: 420 },
-      { fps: 10, width: 360 },
-    ];
+    // balanced presets (quality + speed + Discord safe)
+    let fps = 15;
+    let width = 540;
 
-    let success = false;
-
-    for (const preset of presets) {
-
-      clean(output);
-
-      console.log(
-        `Trying ${preset.width}px @ ${preset.fps}fps`
-      );
-
-      await makeGif(
-        input,
-        output,
-        preset.fps,
-        preset.width
-      );
-
-      if (!fs.existsSync(output)) {
-        continue;
-      }
-
-      const sizeMB =
-        fs.statSync(output).size / 1024 / 1024;
-
-      console.log(
-        `GIF Size: ${sizeMB.toFixed(2)}MB`
-      );
-
-      if (sizeMB <= MAX_MB) {
-        success = true;
-        break;
-      }
+    if (sizeMB > 5) {
+      fps = 13;
+      width = 480;
+    }
+    if (sizeMB > 10) {
+      fps = 10;
+      width = 420;
     }
 
-    /* ---------- FAILED ---------- */
+    await convertGif(input, output, fps, width);
 
-    if (!success) {
-
-      await message.reply(
-        "Video too large for Discord GIF limits."
-      );
-
-      return;
+    if (!fs.existsSync(output)) {
+      return message.reply("Conversion failed.");
     }
 
-    /* ---------- SEND ---------- */
+    const outMB = fs.statSync(output).size / 1024 / 1024;
 
-    await message.reply({
-      files: [output],
-    });
+    if (outMB > 7.5) {
+      return message.reply("GIF too large for Discord.");
+    }
+
+    await message.reply({ files: [output] });
 
   } catch (err) {
-
     console.error(err);
-
-    await message.reply(
-      "Conversion failed."
-    );
-
+    await message.reply("Conversion failed.");
   } finally {
-
-    activeJobs.delete(message.id);
-
+    busy = false;
     clean(input);
     clean(output);
-
   }
-
 });
-
-/* ===================== LOGIN ===================== */
 
 client.login(TOKEN);

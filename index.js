@@ -9,7 +9,7 @@ const ffmpegPath = require("ffmpeg-static");
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
-/* ===================== DISCORD ===================== */
+/* ===================== BOT ===================== */
 
 const client = new Client({
   intents: [
@@ -21,15 +21,11 @@ const client = new Client({
 
 const TOKEN = process.env.TOKEN;
 
-/* ===================== EXPRESS ===================== */
-
 app.get("/", (_, res) => res.send("Bot alive"));
 
 app.listen(process.env.PORT || 3000, () => {
   console.log("Web server running");
 });
-
-/* ===================== READY ===================== */
 
 client.once("ready", () => {
   console.log(`Logged in as ${client.user.tag}`);
@@ -38,65 +34,74 @@ client.once("ready", () => {
 /* ===================== SETTINGS ===================== */
 
 const MAX_MB = 7.5;
-let busy = false; // prevents crashes from multiple conversions
 
 /* ===================== HELPERS ===================== */
 
-function clean(file) {
+function deleteFile(file) {
   try {
     if (file && fs.existsSync(file)) fs.unlinkSync(file);
-  } catch {}
+  } catch (e) {}
 }
 
-function run(cmd) {
+/* ===================== SAFE DOWNLOAD ===================== */
+
+async function downloadFile(url, path) {
+  const res = await axios({
+    url,
+    method: "GET",
+    responseType: "stream",
+    timeout: 120000,
+    maxBodyLength: Infinity,
+  });
+
   return new Promise((resolve, reject) => {
-    cmd.on("end", resolve).on("error", reject);
+    const stream = fs.createWriteStream(path);
+
+    res.data.pipe(stream);
+
+    stream.on("finish", resolve);
+    stream.on("error", reject);
+    res.data.on("error", reject);
   });
 }
 
-/* ===================== CORE CONVERSION ===================== */
+/* ===================== HIGH QUALITY GIF (STABLE) ===================== */
 
-async function convertGif(input, output) {
-  const palette = `palette-${Date.now()}.png`;
-
-  // STEP 1: create palette (fixes pixel/noise issues)
-  await run(
+function convertToGif(input, output, fps, width) {
+  return new Promise((resolve, reject) => {
     ffmpeg(input)
       .outputOptions([
         "-vf",
-        "fps=15,scale=480:-1:flags=lanczos,palettegen"
-      ])
-      .save(palette)
-  );
-
-  // STEP 2: apply palette (high quality GIF)
-  await run(
-    ffmpeg(input)
-      .input(palette)
-      .outputOptions([
-        "-vf",
-        "fps=15,scale=480:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=3",
+        `fps=${fps},scale=${width}:-1:flags=lanczos`,
         "-loop",
         "0",
+        "-preset",
+        "veryfast",
+        "-threads",
+        "2",
       ])
-      .save(output)
-  );
-
-  clean(palette);
+      .outputFormat("gif")
+      .on("start", cmd => console.log("FFmpeg:", cmd))
+      .on("error", err => {
+        console.error("FFmpeg ERROR:", err.message);
+        reject(err);
+      })
+      .on("end", resolve)
+      .save(output);
+  });
 }
 
 /* ===================== MESSAGE ===================== */
 
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
-  if (busy) return message.reply("Bot is busy, try again in a moment.");
 
   const file = message.attachments.first();
   if (!file) return;
 
   const isVideo =
     file.contentType?.startsWith("video/") ||
-    file.url.match(/\.(mp4|mov|webm|mkv|avi)$/i);
+    /\.(mp4|mov|webm|mkv|avi)$/i.test(file.url);
 
   if (!isVideo) return;
 
@@ -105,59 +110,49 @@ client.on("messageCreate", async (message) => {
   const output = `output-${id}.gif`;
 
   try {
-    busy = true;
-
     await message.reply("Converting video...");
 
-    /* ================= DOWNLOAD ================= */
+    /* DOWNLOAD */
+    await downloadFile(file.url, input);
 
-    const res = await axios({
-      url: file.url,
-      method: "GET",
-      responseType: "stream",
-      timeout: 60000,
-    });
+    /* SMART SETTINGS (safe + stable) */
+    const sizeMB = (file.size || 5) / 1024 / 1024;
 
-    const writer = fs.createWriteStream(input);
-    res.data.pipe(writer);
+    let fps = 15;
+    let width = 540;
 
-    await new Promise((resolve, reject) => {
-      writer.on("finish", resolve);
-      writer.on("error", reject);
-    });
+    if (sizeMB > 8) {
+      fps = 12;
+      width = 480;
+    }
 
-    /* ================= CONVERT ================= */
+    if (sizeMB > 15) {
+      fps = 10;
+      width = 420;
+    }
 
-    await convertGif(input, output);
+    /* CONVERT */
+    await convertToGif(input, output, fps, width);
 
     if (!fs.existsSync(output)) {
-      return message.reply("Conversion failed.");
+      return message.reply("Conversion failed (no output file).");
     }
 
-    /* ================= SIZE CHECK ================= */
+    const outMB = fs.statSync(output).size / 1024 / 1024;
 
-    const sizeMB = fs.statSync(output).size / 1024 / 1024;
-
-    if (sizeMB > MAX_MB) {
-      return message.reply(
-        "GIF too large. Try a shorter or lower-motion video."
-      );
+    if (outMB > MAX_MB) {
+      return message.reply("GIF too large for Discord.");
     }
-
-    /* ================= SEND ================= */
 
     await message.reply({ files: [output] });
 
   } catch (err) {
-    console.error(err);
-    await message.reply("Conversion failed.");
+    console.error("FULL ERROR:", err);
+    await message.reply("Conversion failed. Check bot logs.");
   } finally {
-    busy = false;
-    clean(input);
-    clean(output);
+    deleteFile(input);
+    deleteFile(output);
   }
 });
-
-/* ===================== LOGIN ===================== */
 
 client.login(TOKEN);

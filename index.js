@@ -78,7 +78,7 @@ async function download(url, path) {
   });
 }
 
-/* ===================== FAST SAFE GIF ===================== */
+/* ===================== GIF CREATION ===================== */
 
 function makeGif(input, output, fps, width) {
 
@@ -105,7 +105,7 @@ function makeGif(input, output, fps, width) {
 
       .save(output);
 
-    /* prevent infinite hangs */
+    /* prevent hanging */
 
     setTimeout(() => {
       try {
@@ -149,13 +149,14 @@ client.on("messageCreate", async (message) => {
 
     await download(file.url, input);
 
-    /* ---------- AUTO QUALITY ---------- */
+    /* ---------- SMART QUALITY PRESETS ---------- */
 
     const presets = [
-      { fps: 15, width: 480 },
-      { fps: 12, width: 420 },
-      { fps: 10, width: 360 },
-      { fps: 8, width: 320 },
+      { fps: 20, width: 540 },
+      { fps: 18, width: 480 },
+      { fps: 15, width: 420 },
+      { fps: 12, width: 360 },
+      { fps: 10, width: 320 },
     ];
 
     let success = false;

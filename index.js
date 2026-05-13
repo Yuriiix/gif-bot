@@ -21,9 +21,6 @@ const client = new Client({
 
 const TOKEN = process.env.TOKEN;
 
-/* ===================== STATE ===================== */
-let busy = false;
-
 /* ===================== EXPRESS ===================== */
 
 app.get("/", (_, res) => res.send("Bot alive"));
@@ -37,6 +34,10 @@ app.listen(process.env.PORT || 3000, () => {
 client.once("ready", () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
+
+/* ===================== STATE (FIXED) ===================== */
+
+const processing = new Set();
 
 /* ===================== HELPERS ===================== */
 
@@ -66,34 +67,32 @@ function download(url, path) {
   });
 }
 
-/* ===================== HIGH QUALITY GIF CONVERSION ===================== */
+/* ===================== HIGH QUALITY GIF ===================== */
 
 function convertToGif(input, output) {
   const palette = `palette-${Date.now()}.png`;
 
   return new Promise((resolve, reject) => {
 
-    // STEP 1: generate palette (fixes color quality)
+    // STEP 1: palette generation
     ffmpeg(input)
       .outputOptions([
         "-vf",
-        "fps=15,scale=540:-1:flags=lanczos,palettegen=max_colors=256"
+        "fps=18,scale=480:-1:flags=lanczos,palettegen=max_colors=256"
       ])
       .save(palette)
       .on("end", () => {
 
-        // STEP 2: apply palette (final high-quality GIF)
+        // STEP 2: apply palette
         ffmpeg(input)
           .input(palette)
           .outputOptions([
             "-vf",
-            "fps=15,scale=540:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a",
+            "fps=18,scale=480:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=floyd_steinberg",
             "-loop",
             "0"
           ])
           .outputFormat("gif")
-          .on("start", cmd => console.log("FFmpeg started"))
-          .on("stderr", line => console.log("FFmpeg:", line))
           .on("end", () => {
             clean(palette);
             resolve();
@@ -116,47 +115,52 @@ function convertToGif(input, output) {
 
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
-  if (busy) return;
+
+  if (processing.has(message.id)) return;
+  processing.add(message.id);
 
   const file = message.attachments.first();
-  if (!file) return;
-
-  const isVideo =
-    file.contentType?.startsWith("video/") ||
-    /\.(mp4|mov|webm|mkv|avi)$/i.test(file.url);
-
-  if (!isVideo) return;
-
-  busy = true;
+  if (!file || !file.contentType?.startsWith("video/")) {
+    processing.delete(message.id);
+    return;
+  }
 
   const id = Date.now();
   const input = `input-${id}.mp4`;
   const output = `output-${id}.gif`;
 
+  let replied = false;
+
   try {
     await message.reply("Converting video...");
+    replied = true;
 
     await download(file.url, input);
 
     await convertToGif(input, output);
 
     if (!fs.existsSync(output)) {
-      return message.reply("Conversion failed (no output file).");
+      await message.reply("Conversion failed (no output file).");
+      return;
     }
 
     const sizeMB = fs.statSync(output).size / 1024 / 1024;
 
     if (sizeMB > 7.5) {
-      return message.reply("GIF too large for Discord.");
+      await message.reply("GIF too large for Discord.");
+      return;
     }
 
     await message.reply({ files: [output] });
 
   } catch (err) {
-    console.error("FULL ERROR:", err);
-    await message.reply("Conversion failed.");
+    console.error("ERROR:", err);
+
+    if (replied) {
+      await message.reply("Conversion failed.");
+    }
   } finally {
-    busy = false;
+    processing.delete(message.id);
     clean(input);
     clean(output);
   }

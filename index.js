@@ -66,42 +66,49 @@ function download(url, path) {
   });
 }
 
-/* ===================== SAFE GIF CONVERSION ===================== */
+/* ===================== HIGH QUALITY GIF CONVERSION ===================== */
 
 function convertToGif(input, output) {
+  const palette = `palette-${Date.now()}.png`;
+
   return new Promise((resolve, reject) => {
 
-    const command = ffmpeg(input)
+    // STEP 1: generate palette (fixes color quality)
+    ffmpeg(input)
       .outputOptions([
         "-vf",
-        // SIMPLE + SAFE FILTER (NO BROKEN COMPLEX CHAINS)
-        "fps=12,scale=480:-1:flags=lanczos",
-
-        "-loop", "0",
+        "fps=15,scale=540:-1:flags=lanczos,palettegen=max_colors=256"
       ])
-      .outputFormat("gif")
-      .on("start", cmd => {
-        console.log("FFmpeg started:", cmd);
-      })
-      .on("stderr", line => {
-        console.log("FFmpeg:", line);
+      .save(palette)
+      .on("end", () => {
+
+        // STEP 2: apply palette (final high-quality GIF)
+        ffmpeg(input)
+          .input(palette)
+          .outputOptions([
+            "-vf",
+            "fps=15,scale=540:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a",
+            "-loop",
+            "0"
+          ])
+          .outputFormat("gif")
+          .on("start", cmd => console.log("FFmpeg started"))
+          .on("stderr", line => console.log("FFmpeg:", line))
+          .on("end", () => {
+            clean(palette);
+            resolve();
+          })
+          .on("error", err => {
+            clean(palette);
+            reject(err);
+          })
+          .save(output);
+
       })
       .on("error", err => {
-        console.log("FFmpeg ERROR:", err.message);
+        clean(palette);
         reject(err);
-      })
-      .on("end", () => {
-        console.log("FFmpeg done");
-        resolve();
-      })
-      .save(output);
-
-    // safety kill (prevents hanging on bad videos)
-    setTimeout(() => {
-      try {
-        command.kill("SIGKILL");
-      } catch {}
-    }, 120000);
+      });
   });
 }
 
@@ -147,7 +154,7 @@ client.on("messageCreate", async (message) => {
 
   } catch (err) {
     console.error("FULL ERROR:", err);
-    await message.reply("Conversion failed (check logs).");
+    await message.reply("Conversion failed.");
   } finally {
     busy = false;
     clean(input);

@@ -86,7 +86,7 @@ function makeGif(input, output, fps, width) {
 
   return new Promise((resolve, reject) => {
 
-    /* ---------- CREATE PALETTE ---------- */
+    /* ---------- PALETTE ---------- */
 
     ffmpeg(input)
 
@@ -99,7 +99,7 @@ function makeGif(input, output, fps, width) {
 
       .on("end", () => {
 
-        /* ---------- CREATE GIF ---------- */
+        /* ---------- FINAL GIF ---------- */
 
         const command = ffmpeg(input)
 
@@ -107,7 +107,7 @@ function makeGif(input, output, fps, width) {
 
           .complexFilter([
             `fps=${fps},scale=${width}:-1:flags=lanczos[x]`,
-            "[x][1:v]paletteuse=dither=bayer:bayer_scale=3"
+            "[x][1:v]paletteuse=dither=sierra2_4a"
           ])
 
           .outputOptions([
@@ -135,7 +135,7 @@ function makeGif(input, output, fps, width) {
 
           .save(output);
 
-        /* ---------- TIMEOUT SAFETY ---------- */
+        /* ---------- SAFETY TIMEOUT ---------- */
 
         setTimeout(() => {
           try {
@@ -186,14 +186,14 @@ client.on("messageCreate", async (message) => {
 
     await download(file.url, input);
 
-    /* ---------- SMART QUALITY PRESETS ---------- */
+    /* ---------- QUALITY PRESETS ---------- */
 
     const presets = [
-      { fps: 20, width: 640 },
-      { fps: 18, width: 560 },
-      { fps: 15, width: 480 },
-      { fps: 12, width: 420 },
-      { fps: 10, width: 360 },
+      { fps: 30, width: 640 },
+      { fps: 24, width: 560 },
+      { fps: 20, width: 480 },
+      { fps: 16, width: 420 },
+      { fps: 12, width: 360 },
     ];
 
     let success = false;

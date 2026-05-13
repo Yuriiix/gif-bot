@@ -34,16 +34,21 @@ client.once("ready", () => {
 /* ===================== SETTINGS ===================== */
 
 const MAX_MB = 7.5;
+const processing = new Set();
 
 /* ===================== HELPERS ===================== */
 
 function deleteFile(file) {
   try {
     if (file && fs.existsSync(file)) fs.unlinkSync(file);
-  } catch (e) {}
+  } catch {}
 }
 
-/* ===================== SAFE DOWNLOAD ===================== */
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+/* ===================== DOWNLOAD (ROBUST) ===================== */
 
 async function downloadFile(url, path) {
   const res = await axios({
@@ -65,29 +70,45 @@ async function downloadFile(url, path) {
   });
 }
 
-/* ===================== HIGH QUALITY GIF (STABLE) ===================== */
+/* ===================== SAFE FFmpeg ===================== */
 
 function convertToGif(input, output, fps, width) {
   return new Promise((resolve, reject) => {
-    ffmpeg(input)
+
+    const command = ffmpeg(input)
       .outputOptions([
+        // high stability GIF pipeline
         "-vf",
         `fps=${fps},scale=${width}:-1:flags=lanczos`,
+
         "-loop",
         "0",
-        "-preset",
-        "veryfast",
+
+        // prevents broken encodes
+        "-gifflags",
+        "-offsetting",
+
         "-threads",
         "2",
       ])
       .outputFormat("gif")
-      .on("start", cmd => console.log("FFmpeg:", cmd))
+      .on("start", cmd => console.log("FFmpeg started"))
       .on("error", err => {
-        console.error("FFmpeg ERROR:", err.message);
+        console.error("FFmpeg error:", err.message);
         reject(err);
       })
-      .on("end", resolve)
+      .on("end", () => {
+        console.log("FFmpeg done");
+        resolve();
+      })
       .save(output);
+
+    // safety kill (prevents infinite hangs)
+    setTimeout(() => {
+      try {
+        command.kill("SIGKILL");
+      } catch {}
+    }, 120000);
   });
 }
 
@@ -105,6 +126,9 @@ client.on("messageCreate", async (message) => {
 
   if (!isVideo) return;
 
+  if (processing.has(message.id)) return;
+  processing.add(message.id);
+
   const id = Date.now();
   const input = `input-${id}.mp4`;
   const output = `output-${id}.gif`;
@@ -112,44 +136,41 @@ client.on("messageCreate", async (message) => {
   try {
     await message.reply("Converting video...");
 
-    /* DOWNLOAD */
     await downloadFile(file.url, input);
 
-    /* SMART SETTINGS (safe + stable) */
     const sizeMB = (file.size || 5) / 1024 / 1024;
 
-    let fps = 15;
-    let width = 540;
+    /* ===================== STRICT DISCORD SAFE SETTINGS ===================== */
+    let fps = 12;
+    let width = 480;
 
-    if (sizeMB > 8) {
-      fps = 12;
-      width = 480;
-    }
-
-    if (sizeMB > 15) {
+    if (sizeMB < 5) {
+      fps = 15;
+      width = 540;
+    } else if (sizeMB > 10) {
       fps = 10;
       width = 420;
     }
 
-    /* CONVERT */
     await convertToGif(input, output, fps, width);
 
     if (!fs.existsSync(output)) {
-      return message.reply("Conversion failed (no output file).");
+      return message.reply("Conversion failed (no output).");
     }
 
     const outMB = fs.statSync(output).size / 1024 / 1024;
 
     if (outMB > MAX_MB) {
-      return message.reply("GIF too large for Discord.");
+      return message.reply("GIF too large for Discord even after compression.");
     }
 
     await message.reply({ files: [output] });
 
   } catch (err) {
-    console.error("FULL ERROR:", err);
-    await message.reply("Conversion failed. Check bot logs.");
+    console.error("ERROR:", err);
+    await message.reply("Conversion failed (ffmpeg or download error).");
   } finally {
+    processing.delete(message.id);
     deleteFile(input);
     deleteFile(output);
   }

@@ -2,14 +2,16 @@ const express = require("express");
 const app = express();
 
 const { Client, GatewayIntentBits } = require("discord.js");
+
 const fs = require("fs");
 const axios = require("axios");
+
 const ffmpeg = require("fluent-ffmpeg");
 const ffmpegPath = require("ffmpeg-static");
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
-/* ===================== BOT ===================== */
+/* ===================== DISCORD ===================== */
 
 const client = new Client({
   intents: [
@@ -23,7 +25,9 @@ const TOKEN = process.env.TOKEN;
 
 /* ===================== EXPRESS ===================== */
 
-app.get("/", (_, res) => res.send("Bot alive"));
+app.get("/", (_, res) => {
+  res.send("Bot alive");
+});
 
 app.listen(process.env.PORT || 3000, () => {
   console.log("Web server running");
@@ -35,9 +39,11 @@ client.once("ready", () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
-/* ===================== STATE ===================== */
+/* ===================== SETTINGS ===================== */
 
-const processing = new Set();
+const MAX_MB = 7.5;
+
+const activeJobs = new Set();
 
 /* ===================== HELPERS ===================== */
 
@@ -49,80 +55,63 @@ function clean(file) {
   } catch {}
 }
 
-function download(url, path) {
+async function download(url, path) {
+
+  const response = await axios({
+    url,
+    method: "GET",
+    responseType: "stream",
+    timeout: 120000,
+  });
+
   return new Promise((resolve, reject) => {
-    axios({
-      url,
-      method: "GET",
-      responseType: "stream",
-      timeout: 120000,
-    })
-      .then((res) => {
-        const stream = fs.createWriteStream(path);
 
-        res.data.pipe(stream);
+    const writer = fs.createWriteStream(path);
 
-        stream.on("finish", resolve);
-        stream.on("error", reject);
-        res.data.on("error", reject);
-      })
-      .catch(reject);
+    response.data.pipe(writer);
+
+    writer.on("finish", resolve);
+    writer.on("error", reject);
+
+    response.data.on("error", reject);
+
   });
 }
 
-/* ===================== HIGH QUALITY GIF ===================== */
+/* ===================== GIF CREATION ===================== */
 
-function convertToGif(input, output, fps, width) {
-  const palette = `palette-${Date.now()}.png`;
+function makeGif(input, output, fps, width) {
 
   return new Promise((resolve, reject) => {
 
-    /* ---------- PALETTE ---------- */
+    const command = ffmpeg(input)
 
-    ffmpeg(input)
       .outputOptions([
         "-vf",
-        `fps=${fps},scale=${width}:-1:flags=lanczos,palettegen`
+        `fps=${fps},scale=${width}:-1:flags=lanczos`,
+
+        "-loop",
+        "0",
+
+        "-threads",
+        "2",
       ])
-      .save(palette)
 
-      .on("end", () => {
+      .outputFormat("gif")
 
-        /* ---------- GIF ---------- */
+      .on("end", resolve)
 
-        ffmpeg(input)
-          .input(palette)
+      .on("error", reject)
 
-          .complexFilter([
-            `fps=${fps},scale=${width}:-1:flags=lanczos[x]`,
-            "[x][1:v]paletteuse=dither=sierra2_4a"
-          ])
+      .save(output);
 
-          .outputOptions([
-            "-loop",
-            "0"
-          ])
+    /* prevent hanging */
 
-          .outputFormat("gif")
-
-          .on("end", () => {
-            clean(palette);
-            resolve();
-          })
-
-          .on("error", (err) => {
-            clean(palette);
-            reject(err);
-          })
-
-          .save(output);
-
-      })
-
-      .on("error", (err) => {
-        clean(palette);
-        reject(err);
-      });
+    setTimeout(() => {
+      try {
+        command.kill("SIGKILL");
+      } catch {}
+    }, 60000);
 
   });
 }
@@ -133,22 +122,19 @@ client.on("messageCreate", async (message) => {
 
   if (message.author.bot) return;
 
-  if (processing.has(message.id)) return;
-  processing.add(message.id);
+  if (activeJobs.has(message.id)) return;
 
   const file = message.attachments.first();
 
-  const isVideo =
-    file &&
-    (
-      file.contentType?.startsWith("video/") ||
-      /\.(mp4|mov|webm|mkv|avi)$/i.test(file.url)
-    );
+  if (!file) return;
 
-  if (!isVideo) {
-    processing.delete(message.id);
-    return;
-  }
+  const isVideo =
+    file.contentType?.startsWith("video/") ||
+    /\.(mp4|mov|webm|mkv|avi)$/i.test(file.url);
+
+  if (!isVideo) return;
+
+  activeJobs.add(message.id);
 
   const id = Date.now();
 
@@ -163,13 +149,14 @@ client.on("messageCreate", async (message) => {
 
     await download(file.url, input);
 
-    /* ---------- AUTO QUALITY SYSTEM ---------- */
+    /* ---------- SMART QUALITY PRESETS ---------- */
 
     const presets = [
-      { fps: 15, width: 480 },
-      { fps: 12, width: 420 },
-      { fps: 10, width: 360 },
-      { fps: 8, width: 320 },
+      { fps: 20, width: 540 },
+      { fps: 18, width: 480 },
+      { fps: 15, width: 420 },
+      { fps: 12, width: 360 },
+      { fps: 10, width: 320 },
     ];
 
     let success = false;
@@ -182,7 +169,7 @@ client.on("messageCreate", async (message) => {
         `Trying ${preset.width}px @ ${preset.fps}fps`
       );
 
-      await convertToGif(
+      await makeGif(
         input,
         output,
         preset.fps,
@@ -197,10 +184,10 @@ client.on("messageCreate", async (message) => {
         fs.statSync(output).size / 1024 / 1024;
 
       console.log(
-        `Result: ${sizeMB.toFixed(2)}MB`
+        `GIF Size: ${sizeMB.toFixed(2)}MB`
       );
 
-      if (sizeMB <= 7.5) {
+      if (sizeMB <= MAX_MB) {
         success = true;
         break;
       }
@@ -211,7 +198,7 @@ client.on("messageCreate", async (message) => {
     if (!success) {
 
       await message.reply(
-        "Video too large to convert into a Discord-safe GIF."
+        "Video too large for Discord GIF limits."
       );
 
       return;
@@ -225,7 +212,7 @@ client.on("messageCreate", async (message) => {
 
   } catch (err) {
 
-    console.error("ERROR:", err);
+    console.error(err);
 
     await message.reply(
       "Conversion failed."
@@ -233,7 +220,7 @@ client.on("messageCreate", async (message) => {
 
   } finally {
 
-    processing.delete(message.id);
+    activeJobs.delete(message.id);
 
     clean(input);
     clean(output);

@@ -21,7 +21,7 @@ const client = new Client({
 
 const TOKEN = process.env.TOKEN;
 
-/* ===================== STATE LOCK ===================== */
+/* ===================== STATE ===================== */
 let busy = false;
 
 /* ===================== EXPRESS ===================== */
@@ -47,69 +47,61 @@ function clean(file) {
 }
 
 function download(url, path) {
-  return new Promise(async (resolve, reject) => {
-    try {
-      const res = await axios({
-        url,
-        method: "GET",
-        responseType: "stream",
-        timeout: 120000,
-      });
+  return new Promise((resolve, reject) => {
+    axios({
+      url,
+      method: "GET",
+      responseType: "stream",
+      timeout: 120000,
+    })
+      .then(res => {
+        const stream = fs.createWriteStream(path);
+        res.data.pipe(stream);
 
-      const stream = fs.createWriteStream(path);
-
-      res.data.pipe(stream);
-
-      stream.on("finish", resolve);
-      stream.on("error", reject);
-      res.data.on("error", reject);
-    } catch (err) {
-      reject(err);
-    }
+        stream.on("finish", resolve);
+        stream.on("error", reject);
+        res.data.on("error", reject);
+      })
+      .catch(reject);
   });
 }
 
-/* ===================== GIF CONVERSION (PROPER PIPELINE) ===================== */
+/* ===================== SAFE GIF CONVERSION ===================== */
 
 function convertToGif(input, output) {
-  const palette = `palette-${Date.now()}.png`;
-
   return new Promise((resolve, reject) => {
 
-    // STEP 1: palette generation (quality fix)
-    ffmpeg(input)
+    const command = ffmpeg(input)
       .outputOptions([
         "-vf",
-        "fps=12,scale=480:-1:flags=lanczos,palettegen"
+        // SIMPLE + SAFE FILTER (NO BROKEN COMPLEX CHAINS)
+        "fps=12,scale=480:-1:flags=lanczos",
+
+        "-loop", "0",
       ])
-      .save(palette)
-      .on("end", () => {
-
-        // STEP 2: apply palette (final GIF)
-        ffmpeg(input)
-          .input(palette)
-          .outputOptions([
-            "-vf",
-            "fps=12,scale=480:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a",
-            "-loop",
-            "0"
-          ])
-          .format("gif")
-          .on("end", () => {
-            clean(palette);
-            resolve();
-          })
-          .on("error", (err) => {
-            clean(palette);
-            reject(err);
-          })
-          .save(output);
-
+      .outputFormat("gif")
+      .on("start", cmd => {
+        console.log("FFmpeg started:", cmd);
       })
-      .on("error", (err) => {
-        clean(palette);
+      .on("stderr", line => {
+        console.log("FFmpeg:", line);
+      })
+      .on("error", err => {
+        console.log("FFmpeg ERROR:", err.message);
         reject(err);
-      });
+      })
+      .on("end", () => {
+        console.log("FFmpeg done");
+        resolve();
+      })
+      .save(output);
+
+    // safety kill (prevents hanging on bad videos)
+    setTimeout(() => {
+      try {
+        command.kill("SIGKILL");
+      } catch {}
+    }, 120000);
   });
 }
 
@@ -120,7 +112,13 @@ client.on("messageCreate", async (message) => {
   if (busy) return;
 
   const file = message.attachments.first();
-  if (!file || !file.contentType?.startsWith("video/")) return;
+  if (!file) return;
+
+  const isVideo =
+    file.contentType?.startsWith("video/") ||
+    /\.(mp4|mov|webm|mkv|avi)$/i.test(file.url);
+
+  if (!isVideo) return;
 
   busy = true;
 
@@ -129,24 +127,27 @@ client.on("messageCreate", async (message) => {
   const output = `output-${id}.gif`;
 
   try {
-    await message.reply("Converting video to GIF...");
+    await message.reply("Converting video...");
 
     await download(file.url, input);
 
     await convertToGif(input, output);
 
+    if (!fs.existsSync(output)) {
+      return message.reply("Conversion failed (no output file).");
+    }
+
     const sizeMB = fs.statSync(output).size / 1024 / 1024;
 
     if (sizeMB > 7.5) {
-      await message.reply("GIF too large for Discord limit.");
-      return;
+      return message.reply("GIF too large for Discord.");
     }
 
     await message.reply({ files: [output] });
 
   } catch (err) {
-    console.error("ERROR:", err);
-    await message.reply("Conversion failed.");
+    console.error("FULL ERROR:", err);
+    await message.reply("Conversion failed (check logs).");
   } finally {
     busy = false;
     clean(input);

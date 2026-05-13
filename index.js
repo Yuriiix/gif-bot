@@ -35,7 +35,7 @@ client.once("ready", () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
-/* ===================== STATE (FIXED) ===================== */
+/* ===================== STATE ===================== */
 
 const processing = new Set();
 
@@ -43,7 +43,9 @@ const processing = new Set();
 
 function clean(file) {
   try {
-    if (file && fs.existsSync(file)) fs.unlinkSync(file);
+    if (file && fs.existsSync(file)) {
+      fs.unlinkSync(file);
+    }
   } catch {}
 }
 
@@ -55,8 +57,9 @@ function download(url, path) {
       responseType: "stream",
       timeout: 120000,
     })
-      .then(res => {
+      .then((res) => {
         const stream = fs.createWriteStream(path);
+
         res.data.pipe(stream);
 
         stream.on("finish", resolve);
@@ -74,96 +77,135 @@ function convertToGif(input, output) {
 
   return new Promise((resolve, reject) => {
 
-    // STEP 1: palette generation
+    /* ---------- GENERATE PALETTE ---------- */
+
     ffmpeg(input)
       .outputOptions([
         "-vf",
-        "fps=18,scale=480:-1:flags=lanczos,palettegen=max_colors=256"
+        "fps=15,scale=480:-1:flags=lanczos,palettegen"
       ])
       .save(palette)
+
       .on("end", () => {
 
-        // STEP 2: apply palette
+        /* ---------- CREATE GIF ---------- */
+
         ffmpeg(input)
           .input(palette)
+
+          .complexFilter([
+            "fps=15,scale=480:-1:flags=lanczos[x]",
+            "[x][1:v]paletteuse=dither=sierra2_4a"
+          ])
+
           .outputOptions([
-            "-vf",
-            "fps=18,scale=480:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=floyd_steinberg",
             "-loop",
             "0"
           ])
+
           .outputFormat("gif")
+
           .on("end", () => {
             clean(palette);
             resolve();
           })
-          .on("error", err => {
+
+          .on("error", (err) => {
             clean(palette);
             reject(err);
           })
+
           .save(output);
 
       })
-      .on("error", err => {
+
+      .on("error", (err) => {
         clean(palette);
         reject(err);
       });
+
   });
 }
 
 /* ===================== MESSAGE ===================== */
 
 client.on("messageCreate", async (message) => {
+
   if (message.author.bot) return;
 
   if (processing.has(message.id)) return;
   processing.add(message.id);
 
   const file = message.attachments.first();
-  if (!file || !file.contentType?.startsWith("video/")) {
+
+  if (
+    !file ||
+    !(
+      file.contentType?.startsWith("video/") ||
+      /\.(mp4|mov|webm|mkv|avi)$/i.test(file.url)
+    )
+  ) {
     processing.delete(message.id);
     return;
   }
 
   const id = Date.now();
+
   const input = `input-${id}.mp4`;
   const output = `output-${id}.gif`;
 
-  let replied = false;
-
   try {
+
     await message.reply("Converting video...");
-    replied = true;
+
+    /* ---------- DOWNLOAD ---------- */
 
     await download(file.url, input);
+
+    /* ---------- CONVERT ---------- */
 
     await convertToGif(input, output);
 
     if (!fs.existsSync(output)) {
-      await message.reply("Conversion failed (no output file).");
+      await message.reply("Conversion failed.");
       return;
     }
 
-    const sizeMB = fs.statSync(output).size / 1024 / 1024;
+    /* ---------- SIZE CHECK ---------- */
+
+    const sizeMB =
+      fs.statSync(output).size / 1024 / 1024;
 
     if (sizeMB > 7.5) {
-      await message.reply("GIF too large for Discord.");
+      await message.reply(
+        "GIF too large for Discord."
+      );
       return;
     }
 
-    await message.reply({ files: [output] });
+    /* ---------- SEND ---------- */
+
+    await message.reply({
+      files: [output],
+    });
 
   } catch (err) {
+
     console.error("ERROR:", err);
 
-    if (replied) {
-      await message.reply("Conversion failed.");
-    }
+    await message.reply(
+      "Conversion failed."
+    );
+
   } finally {
+
     processing.delete(message.id);
+
     clean(input);
     clean(output);
+
   }
+
 });
 
 /* ===================== LOGIN ===================== */
